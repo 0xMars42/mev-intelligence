@@ -5,10 +5,10 @@
 > system with **memory**: every decoded pending swap is stored, so operators can
 > be clustered, their strategies fingerprinted, and their P&L estimated.
 
-> **Status:** P3.1–P3.5 — live ingestion + persistence, each tx's real on-chain
-> outcome, an entity layer (wallet → **operator** clusters), behavioural
-> **classification** (bot types), and per-bot **analytics & leaderboards**
-> (volume, activity, success/revert rates). LLM-generated reports are next.
+> **Status:** P3.1–P3.6 — full pipeline: live ingestion + persistence, on-chain
+> outcomes, **operator** clustering, behavioural **classification**, per-bot
+> **analytics/leaderboards**, and an **MCP server** that exposes it all to your
+> own Claude (Desktop/Code) — no API key — to generate natural-language reports.
 
 ---
 
@@ -71,6 +71,7 @@ cargo run --release            # daemon: ingests + validates into ./mev_intel.db
 cargo run --bin cluster        # on-demand: cluster wallets into operators
 cargo run --bin classify       # on-demand: assign each address a bot type
 cargo run --bin leaderboard    # on-demand: per-bot stats + top-10 leaderboards
+cargo run --bin mcp            # MCP server (stdio) — register it in your Claude
 ```
 
 Inspect what's been captured (any SQLite client):
@@ -89,6 +90,43 @@ SELECT token_out, count(*) AS n FROM pending_tx
 | `DATABASE_URL` | `sqlite://mev_intel.db` | sqlx connection string |
 | `MEV_STATS_SECS` | `5` | Cumulative stats log interval |
 
+## MCP server — drive it from your own Claude (no API key)
+
+The `mcp` binary is a [Model Context Protocol](https://modelcontextprotocol.io)
+server (JSON-RPC over stdio). It exposes the intelligence as tools — `db_summary`,
+`top_bots`, `bot_profile` — so **your** Claude (Desktop or Code, your credentials)
+can query the data and write natural-language bot reports. No `ANTHROPIC_API_KEY`
+lives in this repo; the inference runs in your Claude client. (MCP works the other
+way round from an API call: Claude *calls the server's tools*, the server returns
+data — the report is written by your Claude.)
+
+Build once: `cargo build --release` → binary at `target/release/mcp`. Make sure the
+DB is populated first (run the daemon, then `cluster` / `classify` / `leaderboard`).
+
+**Claude Desktop (Windows + WSL)** — add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "mev-intelligence": {
+      "command": "wsl",
+      "args": ["-d", "Ubuntu", "--", "bash", "-lc",
+               "cd ~/projects/mev-intelligence && exec ./target/release/mcp"]
+    }
+  }
+}
+```
+
+**Claude Code (inside WSL):**
+
+```bash
+claude mcp add mev-intelligence -- bash -lc 'cd ~/projects/mev-intelligence && exec ./target/release/mcp'
+```
+
+Then ask your Claude, e.g. *"Use mev-intelligence: summarize the DB, then write a
+profile of the top bot by volume."* It calls the tools and reasons over the result.
+Logs go to stderr; stdout is reserved for the protocol.
+
 ## Roadmap
 
 | Phase | Status | What |
@@ -98,7 +136,7 @@ SELECT token_out, count(*) AS n FROM pending_tx
 | P3.3 | ✅ | Entity layer: cluster wallets into operators by co-occurrence (`operator`) |
 | P3.4 | ✅ | Behavioural classification → bot taxonomy (`bot_class`) |
 | P3.5 | ✅ | Per-bot analytics + leaderboards (`bot_stats`): volume / activity / rates |
-| P3.6 | 📋 | LLM agents: natural-language bot profiles (Claude API) |
+| P3.6 | ✅ | MCP server: exposes the intelligence to your own Claude (no API key) |
 | P3.7 | 📋 | Dashboard / query API |
 
 ## License

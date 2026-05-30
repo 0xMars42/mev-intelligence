@@ -21,6 +21,29 @@ pub struct Db {
     pool: SqlitePool,
 }
 
+/// Profil consolidé d'une address (stats + classe + opérateur) — sert le serveur MCP.
+#[derive(Clone, Debug)]
+pub struct BotProfile {
+    pub address: String,
+    pub class: Option<String>,
+    pub tx_count: i64,
+    pub weth_volume_eth: f64,
+    pub distinct_tokens: i64,
+    pub validated: i64,
+    pub mined_success: i64,
+    pub mined_reverted: i64,
+    pub not_mined: i64,
+    pub success_rate: f64,
+    pub revert_rate: f64,
+    pub weth_in_ratio: Option<f64>,
+    pub avg_max_fee_gwei: Option<f64>,
+    pub first_seen_ms: i64,
+    pub last_seen_ms: i64,
+    pub operator_id: Option<i64>,
+    pub operator_size: Option<i64>,
+    pub operator_shared_tokens: Option<i64>,
+}
+
 impl Db {
     /// Ouvre (ou crée) la base et applique les migrations en attente.
     ///
@@ -348,5 +371,112 @@ impl Db {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    // --- Lecture pour le serveur MCP ---------------------------------------
+
+    /// Répartition des classes de bots (pour le résumé).
+    pub async fn bot_class_breakdown(&self) -> Result<Vec<(String, i64)>> {
+        let rows = sqlx::query_as::<_, (String, i64)>(
+            "SELECT class, COUNT(*) FROM bot_class GROUP BY class ORDER BY COUNT(*) DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Nombre d'addresses ayant des stats calculées.
+    pub async fn count_bot_stats(&self) -> Result<i64> {
+        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM bot_stats")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(n)
+    }
+
+    /// Top bots par volume (ETH injecté) ou activité (#swaps), avec leur classe.
+    /// Renvoie `(address, class, tx_count, volume_eth, success_rate, revert_rate)`.
+    pub async fn top_bots(
+        &self,
+        by_volume: bool,
+        limit: i64,
+    ) -> Result<Vec<(String, Option<String>, i64, f64, f64, f64)>> {
+        // Colonne de tri choisie par un bool (pas d'input utilisateur dans le SQL).
+        let col = if by_volume {
+            "s.weth_volume_eth"
+        } else {
+            "s.tx_count"
+        };
+        let sql = format!(
+            "SELECT s.address, c.class, s.tx_count, s.weth_volume_eth, s.success_rate, s.revert_rate \
+             FROM bot_stats s LEFT JOIN bot_class c ON c.address = s.address \
+             ORDER BY {col} DESC LIMIT ?"
+        );
+        let rows = sqlx::query_as::<_, (String, Option<String>, i64, f64, f64, f64)>(&sql)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
+    /// Profil consolidé d'une address (stats + classe + appartenance opérateur).
+    pub async fn bot_profile(&self, address: &str) -> Result<Option<BotProfile>> {
+        let stats = sqlx::query_as::<_, (i64, f64, i64, i64, i64, i64, i64, f64, f64, i64, i64)>(
+            "SELECT tx_count, weth_volume_eth, distinct_tokens, validated, mined_success, \
+                    mined_reverted, not_mined, success_rate, revert_rate, first_seen_ms, last_seen_ms \
+             FROM bot_stats WHERE address = ?",
+        )
+        .bind(address)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((tx_count, volume, distinct, validated, ms, mr, nm, sr, rr, first, last)) = stats
+        else {
+            return Ok(None);
+        };
+
+        let (class, weth_in_ratio, avg_max_fee_gwei) =
+            match sqlx::query_as::<_, (String, f64, f64)>(
+                "SELECT class, weth_in_ratio, avg_max_fee_gwei FROM bot_class WHERE address = ?",
+            )
+            .bind(address)
+            .fetch_optional(&self.pool)
+            .await?
+            {
+                Some((c, w, g)) => (Some(c), Some(w), Some(g)),
+                None => (None, None, None),
+            };
+
+        let (operator_id, operator_size, operator_shared_tokens) =
+            match sqlx::query_as::<_, (i64, i64, i64)>(
+                "SELECT o.id, o.size, o.shared_token_count FROM operator_address oa \
+                 JOIN operator o ON o.id = oa.operator_id WHERE oa.address = ?",
+            )
+            .bind(address)
+            .fetch_optional(&self.pool)
+            .await?
+            {
+                Some((id, size, shared)) => (Some(id), Some(size), Some(shared)),
+                None => (None, None, None),
+            };
+
+        Ok(Some(BotProfile {
+            address: address.to_string(),
+            class,
+            tx_count,
+            weth_volume_eth: volume,
+            distinct_tokens: distinct,
+            validated,
+            mined_success: ms,
+            mined_reverted: mr,
+            not_mined: nm,
+            success_rate: sr,
+            revert_rate: rr,
+            weth_in_ratio,
+            avg_max_fee_gwei,
+            first_seen_ms: first,
+            last_seen_ms: last,
+            operator_id,
+            operator_size,
+            operator_shared_tokens,
+        }))
     }
 }

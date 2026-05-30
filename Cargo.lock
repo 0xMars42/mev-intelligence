@@ -2798,6 +2798,7 @@ dependencies = [
  "eth-mempool-watcher",
  "eyre",
  "futures-util",
+ "serde_json",
  "sqlx",
  "tokio",
  "tracing",
