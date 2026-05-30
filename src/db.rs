@@ -21,8 +21,9 @@ pub struct Db {
     pool: SqlitePool,
 }
 
-/// Profil consolidé d'une address (stats + classe + opérateur) — sert le serveur MCP.
-#[derive(Clone, Debug)]
+/// Profil consolidé d'une address (stats + classe + opérateur). Sert le serveur
+/// MCP et l'API web (d'où `Serialize`).
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct BotProfile {
     pub address: String,
     pub class: Option<String>,
@@ -478,5 +479,34 @@ impl Db {
             operator_size,
             operator_shared_tokens,
         }))
+    }
+
+    /// Liste des opérateurs (clusters multi-address) avec leurs addresses.
+    /// `(id, size, shared_tokens, first_seen_ms, last_seen_ms, addresses)`.
+    pub async fn list_operators(&self) -> Result<Vec<(i64, i64, i64, i64, i64, Vec<String>)>> {
+        let ops = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
+            "SELECT id, size, shared_token_count, first_seen_ms, last_seen_ms \
+             FROM operator ORDER BY size DESC, shared_token_count DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::with_capacity(ops.len());
+        for (id, size, shared, first, last) in ops {
+            let addrs = sqlx::query_as::<_, (String,)>(
+                "SELECT address FROM operator_address WHERE operator_id = ? ORDER BY address",
+            )
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await?;
+            out.push((
+                id,
+                size,
+                shared,
+                first,
+                last,
+                addrs.into_iter().map(|(a,)| a).collect(),
+            ));
+        }
+        Ok(out)
     }
 }

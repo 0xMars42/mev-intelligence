@@ -24,7 +24,8 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 dotenvy = "0.15.7"
 eyre = "0.6.12"
 futures-util = "0.3.32"
-# Le serveur MCP parle JSON-RPC sur stdio -> on a besoin de io-std + io-util.
+# Le serveur MCP parle JSON-RPC sur stdio (io-std/io-util) ; le dashboard web
+# axum a besoin de "net" pour le TcpListener.
 tokio = { version = "1.52.3", features = [
     "rt",
     "macros",
@@ -32,11 +33,15 @@ tokio = { version = "1.52.3", features = [
     "signal",
     "io-std",
     "io-util",
+    "net",
 ] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-# JSON-RPC du serveur MCP (Value + json! macro ; pas besoin de derive serde).
+# JSON (serveur MCP + API web). `derive` pour (de)serialiser les structs d'API.
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Dashboard + API JSON (P3.7).
+axum = "0.8"
 
 [profile.release]
 lto = "fat"

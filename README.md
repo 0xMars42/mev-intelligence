@@ -5,10 +5,10 @@
 > system with **memory**: every decoded pending swap is stored, so operators can
 > be clustered, their strategies fingerprinted, and their P&L estimated.
 
-> **Status:** P3.1–P3.6 — full pipeline: live ingestion + persistence, on-chain
-> outcomes, **operator** clustering, behavioural **classification**, per-bot
-> **analytics/leaderboards**, and an **MCP server** that exposes it all to your
-> own Claude (Desktop/Code) — no API key — to generate natural-language reports.
+> **Status:** P3.1–P3.7 — full pipeline: live ingestion → on-chain outcomes →
+> **operator** clustering → behavioural **classification** → per-bot
+> **analytics/leaderboards**, exposed via an **MCP server** (drive it from your
+> own Claude — no API key) and a **web dashboard + JSON API**.
 
 ---
 
@@ -72,6 +72,7 @@ cargo run --bin cluster        # on-demand: cluster wallets into operators
 cargo run --bin classify       # on-demand: assign each address a bot type
 cargo run --bin leaderboard    # on-demand: per-bot stats + top-10 leaderboards
 cargo run --bin mcp            # MCP server (stdio) — register it in your Claude
+cargo run --bin web            # web dashboard + JSON API at http://127.0.0.1:8080
 ```
 
 Inspect what's been captured (any SQLite client):
@@ -89,6 +90,15 @@ SELECT token_out, count(*) AS n FROM pending_tx
 | `ETH_WS_URL` | `wss://ethereum-rpc.publicnode.com` | WebSocket RPC (pending full tx) |
 | `DATABASE_URL` | `sqlite://mev_intel.db` | sqlx connection string |
 | `MEV_STATS_SECS` | `5` | Cumulative stats log interval |
+
+## Web dashboard & JSON API
+
+`cargo run --bin web` serves a small exploration dashboard and a JSON API at
+`http://127.0.0.1:8080` (`MEV_WEB_ADDR` to override):
+
+- `GET /` — dashboard: counts, class breakdown, top bots by volume / activity.
+- `GET /api/summary` · `GET /api/top?metric=volume&limit=10` ·
+  `GET /api/bot/{address}` · `GET /api/operators` — JSON.
 
 ## MCP server — drive it from your own Claude (no API key)
 
@@ -137,7 +147,7 @@ Logs go to stderr; stdout is reserved for the protocol.
 | P3.4 | ✅ | Behavioural classification → bot taxonomy (`bot_class`) |
 | P3.5 | ✅ | Per-bot analytics + leaderboards (`bot_stats`): volume / activity / rates |
 | P3.6 | ✅ | MCP server: exposes the intelligence to your own Claude (no API key) |
-| P3.7 | 📋 | Dashboard / query API |
+| P3.7 | ✅ | Web dashboard + JSON API (axum) |
 
 ## License
 
