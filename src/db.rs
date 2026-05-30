@@ -204,12 +204,18 @@ impl Db {
         // WETH L1 (lowercase, comme on stocke les adresses décodées).
         const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
 
-        let base = sqlx::query_as::<_, (String, i64, i64, i64, i64, f64)>(
+        // Deux placeholders WETH positionnels (count + volume) -> on bind 2 fois.
+        // Le volume est sommé en REAL (proxy ETH-scale ; la perte sub-wei n'a
+        // pas d'impact sur un classement), pas en U256 exact.
+        let base = sqlx::query_as::<_, (String, i64, i64, i64, i64, f64, f64, i64, i64)>(
             "SELECT from_addr, COUNT(*), COUNT(DISTINCT token_out), \
-                    SUM(CASE WHEN token_in = ?1 THEN 1 ELSE 0 END), \
-                    COUNT(token_in), AVG(max_fee_gwei) \
+                    SUM(CASE WHEN token_in = ? THEN 1 ELSE 0 END), \
+                    COUNT(token_in), AVG(max_fee_gwei), \
+                    SUM(CASE WHEN token_in = ? THEN CAST(amount_in_wei AS REAL) ELSE 0 END) / 1e18, \
+                    MIN(seen_at_ms), MAX(seen_at_ms) \
              FROM pending_tx GROUP BY from_addr",
         )
+        .bind(WETH)
         .bind(WETH)
         .fetch_all(&self.pool)
         .await?;
@@ -217,7 +223,17 @@ impl Db {
         let mut map: HashMap<String, AddressFeatures> = base
             .into_iter()
             .map(
-                |(address, tx, distinct, weth_in, token_in_count, avg_gas)| {
+                |(
+                    address,
+                    tx,
+                    distinct,
+                    weth_in,
+                    token_in_count,
+                    avg_gas,
+                    volume_eth,
+                    first_seen,
+                    last_seen,
+                )| {
                     (
                         address.clone(),
                         AddressFeatures {
@@ -231,6 +247,9 @@ impl Db {
                             mined_success: 0,
                             mined_reverted: 0,
                             not_mined: 0,
+                            weth_volume_eth: volume_eth,
+                            first_seen_ms: first_seen,
+                            last_seen_ms: last_seen,
                         },
                     )
                 },
@@ -284,6 +303,45 @@ impl Db {
             .bind(f.weth_in_ratio())
             .bind(f.avg_max_fee_gwei)
             .bind(f.revert_rate())
+            .bind(computed_at_ms)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Remplace entièrement la table `bot_stats` (analytics par address : volume,
+    /// activité, taux de succès/revert) — recalcul atomique.
+    pub async fn replace_bot_stats(
+        &self,
+        features: &[AddressFeatures],
+        computed_at_ms: i64,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM bot_stats")
+            .execute(&mut *tx)
+            .await?;
+        for f in features {
+            sqlx::query(
+                "INSERT OR REPLACE INTO bot_stats \
+                 (address, tx_count, weth_volume_eth, distinct_tokens, validated, \
+                  mined_success, mined_reverted, not_mined, success_rate, revert_rate, \
+                  first_seen_ms, last_seen_ms, computed_at_ms) \
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            )
+            .bind(&f.address)
+            .bind(f.tx_count as i64)
+            .bind(f.weth_volume_eth)
+            .bind(f.distinct_tokens_out as i64)
+            .bind(f.validated as i64)
+            .bind(f.mined_success as i64)
+            .bind(f.mined_reverted as i64)
+            .bind(f.not_mined as i64)
+            .bind(f.success_rate())
+            .bind(f.revert_rate())
+            .bind(f.first_seen_ms)
+            .bind(f.last_seen_ms)
             .bind(computed_at_ms)
             .execute(&mut *tx)
             .await?;

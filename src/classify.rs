@@ -28,6 +28,12 @@ pub struct AddressFeatures {
     pub mined_success: u64,
     pub mined_reverted: u64,
     pub not_mined: u64,
+    /// Volume d'entrée en ETH (somme des `amount_in` des swaps WETH-in). Proxy
+    /// de taille d'activité — PAS une valorisation des tokens reçus.
+    pub weth_volume_eth: f64,
+    /// 1re et dernière activité observée.
+    pub first_seen_ms: i64,
+    pub last_seen_ms: i64,
 }
 
 impl AddressFeatures {
@@ -56,6 +62,15 @@ impl AddressFeatures {
             0.0
         } else {
             self.mined_reverted as f64 / self.validated as f64
+        }
+    }
+
+    /// Part de swaps minés avec succès parmi ceux validés.
+    pub fn success_rate(&self) -> f64 {
+        if self.validated == 0 {
+            0.0
+        } else {
+            self.mined_success as f64 / self.validated as f64
         }
     }
 }
@@ -144,6 +159,9 @@ mod tests {
             mined_success: 0,
             mined_reverted: 0,
             not_mined: 0,
+            weth_volume_eth: 0.0,
+            first_seen_ms: 0,
+            last_seen_ms: 0,
         }
     }
 
@@ -192,5 +210,17 @@ mod tests {
     fn ordinary_activity_is_generic() {
         // diversity 0.5, gas bas, pas d'outcomes -> rien ne matche.
         assert_eq!(classify(&feat("x")), BotClass::Generic);
+    }
+
+    #[test]
+    fn success_and_revert_rates() {
+        let mut f = feat("r");
+        f.validated = 4;
+        f.mined_success = 3;
+        f.mined_reverted = 1;
+        assert!((f.success_rate() - 0.75).abs() < 1e-9);
+        assert!((f.revert_rate() - 0.25).abs() < 1e-9);
+        // Sans outcome validé, les taux retombent à 0 (pas de division par 0).
+        assert_eq!(feat("z").success_rate(), 0.0);
     }
 }
