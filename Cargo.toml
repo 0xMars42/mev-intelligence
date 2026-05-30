@@ -2,6 +2,8 @@
 name = "mev-intelligence"
 version = "0.1.0"
 edition = "2024"
+# `cargo run` lance le daemon d'ingestion ; `cargo run --bin cluster` l'analyse.
+default-run = "mev-intelligence"
 
 [dependencies]
 # Couche d'ingestion : on reutilise eth-mempool-watcher (P2) comme librairie.

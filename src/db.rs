@@ -8,6 +8,7 @@
 //! Les migrations (`./migrations`) sont embarquées dans le binaire à la
 //! compilation et exécutées au démarrage : pas de `sqlx-cli` requis.
 
+use crate::cluster::Cluster;
 use crate::ingest::PendingTxRow;
 use eyre::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
@@ -129,6 +130,67 @@ impl Db {
     /// Nombre total d'outcomes figés (pour les stats).
     pub async fn count_outcomes(&self) -> Result<i64> {
         let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tx_outcome")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(n)
+    }
+
+    /// Observations de swap pour le clustering : `(from, token_out, seen_at_ms)`
+    /// de chaque pending tx ayant un `token_out` décodé, triées par temps.
+    pub async fn swap_observations(&self) -> Result<Vec<(String, String, i64)>> {
+        let rows = sqlx::query_as::<_, (String, String, i64)>(
+            "SELECT from_addr, token_out, seen_at_ms FROM pending_tx \
+             WHERE token_out IS NOT NULL ORDER BY seen_at_ms ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Remplace entièrement les opérateurs persistés par le résultat d'un run de
+    /// clustering (recalcul complet, atomique via transaction).
+    pub async fn replace_operators(&self, clusters: &[Cluster], computed_at_ms: i64) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM operator_address")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM operator")
+            .execute(&mut *tx)
+            .await?;
+
+        for c in clusters {
+            let res = sqlx::query(
+                "INSERT INTO operator \
+                 (size, shared_token_count, first_seen_ms, last_seen_ms, computed_at_ms) \
+                 VALUES (?,?,?,?,?)",
+            )
+            .bind(c.addresses.len() as i64)
+            .bind(c.shared_tokens.len() as i64)
+            .bind(c.first_seen_ms)
+            .bind(c.last_seen_ms)
+            .bind(computed_at_ms)
+            .execute(&mut *tx)
+            .await?;
+            let operator_id = res.last_insert_rowid();
+
+            for address in &c.addresses {
+                sqlx::query(
+                    "INSERT OR REPLACE INTO operator_address (address, operator_id) VALUES (?,?)",
+                )
+                .bind(address)
+                .bind(operator_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Nombre d'opérateurs (clusters) persistés.
+    pub async fn count_operators(&self) -> Result<i64> {
+        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM operator")
             .fetch_one(&self.pool)
             .await?;
         Ok(n)
