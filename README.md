@@ -1,0 +1,103 @@
+# mev-intelligence
+
+> A platform that **ingests, persists and (soon) classifies** MEV bot activity
+> on Ethereum mainnet — built in Rust. It turns a real-time mempool radar into a
+> system with **memory**: every decoded pending swap is stored, so operators can
+> be clustered, their strategies fingerprinted, and their P&L estimated.
+
+> **Status:** P3.1 — live ingestion + persistence. The analysis layers
+> (clustering, classification, P&L, LLM reports) are the next phases.
+
+---
+
+## Why this exists
+
+Detecting MEV activity live is useful but ephemeral. The value is in
+**understanding the actors**: which addresses belong to the same operator, what
+strategy each bot runs (sniper / sandwich / arb / JIT / copy-trader), how
+profitable they are. That requires *accumulated* data, not a rolling buffer.
+
+This project is the data + intelligence layer on top of two earlier Rust
+projects:
+
+- **[`eth-mempool-watcher`](https://github.com/0xMars42/eth-mempool-watcher)** —
+  real-time mempool decoding + MEV pattern detection. **Reused here as a
+  library** (`routers` + `decode`), not duplicated.
+- **[`base-arb-scanner`](https://github.com/0xMars42/base-arb-scanner)** —
+  cross-DEX arbitrage pricing with on-chain Quoter validation.
+
+## What it does today (P3.1)
+
+```
+WebSocket pending tx  ─►  router whitelist filter  ─►  decode swap (P2 lib)
+                                                            │
+                                                            ▼
+                                          pending_row (pure mapping)
+                                                            │
+                                                            ▼
+                                        SQLite (sqlx)  ── pending_tx table
+```
+
+- Subscribes to **full pending tx bodies** over WebSocket (no polling, no API key).
+- Filters to known DEX routers (Uniswap V2/V3, Universal Router, 1inch v6).
+- Decodes the swap and writes a flat `pending_tx` row, **deduplicated on tx hash**.
+- Embedded SQL migrations run at startup (no `sqlx-cli` needed).
+
+## Design choices
+
+- **Reuses P2 as a crate** (`eth-mempool-watcher = { path = ".." }`) — the decode
+  machinery is already live-validated; P3 consumes it.
+- **Pure mapping layer** (`ingest::pending_row`) — `DecodedSwap` → DB row is a
+  pure function, unit-tested without any network or database.
+- **SQLite first, Postgres-portable** — zero infra to run locally; the only
+  SQLite-specific SQL (`INSERT OR IGNORE`) is isolated in `db.rs`. Postgres is the
+  documented scale-path, ClickHouse beyond that.
+- **U256 amounts stored as decimal text** — a 256-bit amount doesn't fit a 64-bit
+  integer column; text keeps them exact and portable.
+
+## Quick start
+
+Requires Rust (edition 2024). No database server needed — SQLite is embedded.
+
+```bash
+git clone https://github.com/0xMars42/mev-intelligence.git
+cd mev-intelligence
+cargo run --release            # starts ingesting into ./mev_intel.db
+```
+
+Inspect what's been captured (any SQLite client):
+
+```sql
+SELECT router, kind, count(*) FROM pending_tx GROUP BY 1, 2 ORDER BY 3 DESC;
+SELECT token_out, count(*) AS n FROM pending_tx
+  WHERE token_out IS NOT NULL GROUP BY 1 ORDER BY n DESC LIMIT 10;
+```
+
+## Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ETH_WS_URL` | `wss://ethereum-rpc.publicnode.com` | WebSocket RPC (pending full tx) |
+| `DATABASE_URL` | `sqlite://mev_intel.db` | sqlx connection string |
+| `MEV_STATS_SECS` | `5` | Cumulative stats log interval |
+
+## Roadmap
+
+| Phase | Status | What |
+|---|---|---|
+| P3.1 | 🔨 | Live ingestion + persistence (`pending_tx`) |
+| P3.2 | 📋 | Backfill receipts + swap/outcome dataset |
+| P3.3 | 📋 | Entity layer: address clustering (funding, deployer, timing) |
+| P3.4 | 📋 | Behavioural classification → bot taxonomy |
+| P3.5 | 📋 | P&L estimation + leaderboards |
+| P3.6 | 📋 | LLM agents: natural-language bot profiles (Claude API) |
+| P3.7 | 📋 | Dashboard / query API |
+
+## License
+
+MIT.
+
+## Author
+
+[0xMars42](https://github.com/0xMars42) — portfolio project for **Rust / EVM /
+MEV research** roles.

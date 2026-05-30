@@ -1,0 +1,32 @@
+[package]
+name = "mev-intelligence"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Couche d'ingestion : on reutilise eth-mempool-watcher (P2) comme librairie.
+# C'est la meme machine de decode/routers qu'on a deja validee en live, exposee
+# en `pub mod` — P3 la *consomme* au lieu de la dupliquer.
+eth-mempool-watcher = { path = "../eth-mempool-watcher" }
+
+# alloy : provider WS + rpc-types. Le trait `alloy::consensus::Transaction`
+# (to/input/value/max_fee_per_gas) nous vient en transitif via eth-mempool-watcher
+# qui active alloy "full" — pas besoin de le redeclarer (et features unifiees par cargo).
+alloy = { version = "2.0.5", features = ["provider-ws", "rpc-types-eth"] }
+
+# Persistance : SQLite embarque (zero serveur) via sqlx. Le SQL reste portable
+# vers Postgres (cible scale-path) ; les seuls bouts SQLite-specifiques sont
+# isoles dans `db.rs` (ex: INSERT OR IGNORE).
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+
+dotenvy = "0.15.7"
+eyre = "0.6.12"
+futures-util = "0.3.32"
+tokio = { version = "1.52.3", features = ["rt", "macros", "time", "signal"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true

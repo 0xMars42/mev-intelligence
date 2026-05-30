@@ -1,0 +1,9 @@
+/target
+
+# Base SQLite locale (donnees ingerees) — ne pas versionner.
+*.db
+*.db-shm
+*.db-wal
+
+# Env local.
+.env
