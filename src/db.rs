@@ -8,10 +8,12 @@
 //! Les migrations (`./migrations`) sont embarquées dans le binaire à la
 //! compilation et exécutées au démarrage : pas de `sqlx-cli` requis.
 
+use crate::classify::{AddressFeatures, BotClass};
 use crate::cluster::Cluster;
 use crate::ingest::PendingTxRow;
 use eyre::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
+use std::collections::HashMap;
 
 /// Handle de base de données (le `SqlitePool` est `Clone`, partage interne Arc).
 #[derive(Clone, Debug)]
@@ -194,5 +196,99 @@ impl Db {
             .fetch_one(&self.pool)
             .await?;
         Ok(n)
+    }
+
+    /// Features par address pour la classification (P3.4) : deux agrégats SQL
+    /// (`pending_tx` puis jointure `tx_outcome`) recombinés en mémoire.
+    pub async fn address_features(&self) -> Result<Vec<AddressFeatures>> {
+        // WETH L1 (lowercase, comme on stocke les adresses décodées).
+        const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
+
+        let base = sqlx::query_as::<_, (String, i64, i64, i64, i64, f64)>(
+            "SELECT from_addr, COUNT(*), COUNT(DISTINCT token_out), \
+                    SUM(CASE WHEN token_in = ?1 THEN 1 ELSE 0 END), \
+                    COUNT(token_in), AVG(max_fee_gwei) \
+             FROM pending_tx GROUP BY from_addr",
+        )
+        .bind(WETH)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut map: HashMap<String, AddressFeatures> = base
+            .into_iter()
+            .map(
+                |(address, tx, distinct, weth_in, token_in_count, avg_gas)| {
+                    (
+                        address.clone(),
+                        AddressFeatures {
+                            address,
+                            tx_count: tx as u64,
+                            distinct_tokens_out: distinct as u64,
+                            weth_in_count: weth_in as u64,
+                            token_in_count: token_in_count as u64,
+                            avg_max_fee_gwei: avg_gas,
+                            validated: 0,
+                            mined_success: 0,
+                            mined_reverted: 0,
+                            not_mined: 0,
+                        },
+                    )
+                },
+            )
+            .collect();
+
+        let outcomes = sqlx::query_as::<_, (String, String, i64)>(
+            "SELECT p.from_addr, o.outcome, COUNT(*) \
+             FROM pending_tx p JOIN tx_outcome o ON o.hash = p.hash \
+             GROUP BY p.from_addr, o.outcome",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        for (address, outcome, count) in outcomes {
+            if let Some(f) = map.get_mut(&address) {
+                let c = count as u64;
+                f.validated += c;
+                match outcome.as_str() {
+                    "MinedSuccess" => f.mined_success += c,
+                    "MinedReverted" => f.mined_reverted += c,
+                    _ => f.not_mined += c,
+                }
+            }
+        }
+
+        Ok(map.into_values().collect())
+    }
+
+    /// Remplace entièrement la table `bot_class` par une classification fraîche.
+    pub async fn replace_bot_classes(
+        &self,
+        items: &[(AddressFeatures, BotClass)],
+        computed_at_ms: i64,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM bot_class")
+            .execute(&mut *tx)
+            .await?;
+        for (f, class) in items {
+            sqlx::query(
+                "INSERT OR REPLACE INTO bot_class \
+                 (address, class, tx_count, distinct_tokens, weth_in_ratio, \
+                  avg_max_fee_gwei, revert_rate, classified_at_ms) \
+                 VALUES (?,?,?,?,?,?,?,?)",
+            )
+            .bind(&f.address)
+            .bind(class.label())
+            .bind(f.tx_count as i64)
+            .bind(f.distinct_tokens_out as i64)
+            .bind(f.weth_in_ratio())
+            .bind(f.avg_max_fee_gwei)
+            .bind(f.revert_rate())
+            .bind(computed_at_ms)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 }

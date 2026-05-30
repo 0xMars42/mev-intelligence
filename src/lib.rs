@@ -11,8 +11,9 @@
 //! Modules :
 //! - [`config`]  : configuration runtime (URLs, DB) depuis l'environnement.
 //! - [`db`]      : couche de persistance (SQLite via sqlx, portable Postgres).
-//! - [`ingest`]  : mapping `DecodedSwap` -> ligne `pending_tx` (logique pure).
-//! - [`cluster`] : regroupement d'addresses par co-occurrence (entity layer).
+//! - [`ingest`]   : mapping `DecodedSwap` -> ligne `pending_tx` (logique pure).
+//! - [`cluster`]  : regroupement d'addresses par co-occurrence (entity layer).
+//! - [`classify`] : fingerprint comportemental -> taxonomie de bots.
 
 #![warn(clippy::pedantic, clippy::nursery)]
 #![allow(
@@ -33,6 +34,7 @@
     clippy::duration_suboptimal_units
 )]
 
+pub mod classify;
 pub mod cluster;
 pub mod config;
 pub mod db;
