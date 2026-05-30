@@ -26,7 +26,10 @@
     clippy::float_cmp,
     // doc_markdown : exige des backticks autour de SQLite/URL/WebSocket/Postgres...
     // dans les docs. Bruit pur sur de la prose technique — on l'eteint sciemment.
-    clippy::doc_markdown
+    clippy::doc_markdown,
+    // duration_suboptimal_units : prefere from_mins/from_hours. `from_secs(N)` reste
+    // parfaitement clair pour des seuils exprimes en secondes — on garde la seconde.
+    clippy::duration_suboptimal_units
 )]
 
 pub mod config;

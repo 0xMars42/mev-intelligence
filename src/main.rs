@@ -24,9 +24,11 @@
 )]
 
 use alloy::consensus::Transaction;
+use alloy::primitives::B256;
 use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use eth_mempool_watcher::decode::decode as decode_swap;
 use eth_mempool_watcher::routers::lookup;
+use eth_mempool_watcher::validate::{ValidationOutcome, validate_hashes};
 use eyre::Result;
 use futures_util::StreamExt;
 use mev_intelligence::config::Config;
@@ -35,6 +37,9 @@ use mev_intelligence::ingest::{TxContext, pending_row};
 use std::time::Instant;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+
+/// Nombre max de tx validees par passe (borne le cout RPC d'un tick).
+const VALIDATE_BATCH: i64 = 50;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -71,7 +76,9 @@ async fn main() -> Result<()> {
     let mut total: u64 = 0; // tx ciblant un router whitelist
     let mut inserted: u64 = 0; // nouvelles lignes persistees
     let mut dup: u64 = 0; // doublons ignores (deja vus)
+    let mut outcomes_recorded: u64 = 0; // outcomes figes (P3.2)
     let mut last_log = Instant::now();
+    let mut validate_tick = tokio::time::interval(cfg.validate_every);
 
     loop {
         tokio::select! {
@@ -125,6 +132,64 @@ async fn main() -> Result<()> {
                     last_log = Instant::now();
                 }
             }
+            _ = validate_tick.tick() => {
+                // Passe de validation : pour les pending tx assez vieilles et pas
+                // encore figees, on lit le receipt et on enregistre l'outcome.
+                let now = now_ms();
+                let max_seen = now - cfg.validate_min_age.as_millis() as i64;
+                let candidates = db
+                    .hashes_to_validate(max_seen, VALIDATE_BATCH)
+                    .await
+                    .unwrap_or_default();
+                let parsed: Vec<(String, i64, B256)> = candidates
+                    .into_iter()
+                    .filter_map(|(h, s)| h.parse::<B256>().ok().map(|b| (h, s, b)))
+                    .collect();
+                if !parsed.is_empty() {
+                    let hashes: Vec<B256> = parsed.iter().map(|(_, _, b)| *b).collect();
+                    let outcomes = validate_hashes(&provider, &hashes).await;
+                    let drop_before = now - cfg.validate_max_age.as_millis() as i64;
+                    let (mut ms, mut mr, mut nm, mut retry) = (0u32, 0u32, 0u32, 0u32);
+                    for ((hash, seen_at, _), (_, outcome)) in parsed.iter().zip(&outcomes) {
+                        let (label, block) = match outcome {
+                            ValidationOutcome::MinedSuccess { block_number } => {
+                                ms += 1;
+                                ("MinedSuccess", Some(*block_number as i64))
+                            }
+                            ValidationOutcome::MinedReverted { block_number } => {
+                                mr += 1;
+                                ("MinedReverted", Some(*block_number as i64))
+                            }
+                            ValidationOutcome::NotMined => {
+                                // Pas de receipt : on ne fige NotMined que si la tx est
+                                // vraiment vieille ; sinon elle peut encore etre minee,
+                                // on la re-testera au prochain tick.
+                                if *seen_at > drop_before {
+                                    retry += 1;
+                                    continue;
+                                }
+                                nm += 1;
+                                ("NotMined", None)
+                            }
+                        };
+                        if let Err(e) = db.record_outcome(hash, label, block, now).await {
+                            warn!(err = %e, hash = %hash, "record_outcome KO");
+                        } else {
+                            outcomes_recorded += 1;
+                        }
+                    }
+                    let in_db = db.count_outcomes().await.unwrap_or(-1);
+                    info!(
+                        checked = parsed.len(),
+                        mined_success = ms,
+                        mined_reverted = mr,
+                        not_mined = nm,
+                        retry_later = retry,
+                        outcomes_in_db = in_db,
+                        "validation"
+                    );
+                }
+            }
             _ = tokio::signal::ctrl_c() => {
                 info!("Ctrl+C recu — arret propre");
                 break;
@@ -133,12 +198,15 @@ async fn main() -> Result<()> {
     }
 
     let in_db = db.count_pending().await.unwrap_or(-1);
+    let outcomes_in_db = db.count_outcomes().await.unwrap_or(-1);
     info!(
         raw,
         total,
         inserted,
         dup,
         rows_in_db = in_db,
+        outcomes_recorded,
+        outcomes_in_db,
         "arret — bilan"
     );
     Ok(())

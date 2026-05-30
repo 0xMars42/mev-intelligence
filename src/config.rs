@@ -4,9 +4,12 @@
 //!
 //! | Variable        | Défaut                                | Rôle                          |
 //! |-----------------|---------------------------------------|-------------------------------|
-//! | `ETH_WS_URL`    | `wss://ethereum-rpc.publicnode.com`   | WS mainnet (pending full tx)  |
-//! | `DATABASE_URL`  | `sqlite://mev_intel.db`               | Base SQLite locale            |
-//! | `MEV_STATS_SECS`| `5`                                   | Période des logs de stats     |
+//! | `ETH_WS_URL`             | `wss://ethereum-rpc.publicnode.com` | WS mainnet (pending full tx)        |
+//! | `DATABASE_URL`           | `sqlite://mev_intel.db`             | Base SQLite locale                  |
+//! | `MEV_STATS_SECS`         | `5`                                 | Période des logs de stats           |
+//! | `MEV_VALIDATE_EVERY_SECS`| `30`                                | Période de la passe de validation   |
+//! | `MEV_VALIDATE_MIN_AGE_SECS`| `60`                              | Âge mini avant de valider une tx    |
+//! | `MEV_VALIDATE_MAX_AGE_SECS`| `300`                             | Âge au-delà duquel NotMined = droppée |
 
 use eyre::{Context, Result};
 use std::time::Duration;
@@ -26,6 +29,14 @@ pub struct Config {
     pub database_url: String,
     /// Période d'émission des stats cumulées.
     pub stats_interval: Duration,
+    /// Période de la passe de validation post-block (lecture des receipts).
+    pub validate_every: Duration,
+    /// Âge minimal d'une pending tx avant de tenter de la valider (lui laisser
+    /// le temps d'être minée — sinon NotMined serait un faux négatif).
+    pub validate_min_age: Duration,
+    /// Âge au-delà duquel une tx toujours sans receipt est figée `NotMined`
+    /// (droppée/remplacée). En-dessous, on la re-testera au prochain tick.
+    pub validate_max_age: Duration,
 }
 
 impl Default for Config {
@@ -34,6 +45,9 @@ impl Default for Config {
             ws_url: ETH_WS_DEFAULT.to_string(),
             database_url: DATABASE_URL_DEFAULT.to_string(),
             stats_interval: Duration::from_secs(5),
+            validate_every: Duration::from_secs(30),
+            validate_min_age: Duration::from_secs(60),
+            validate_max_age: Duration::from_secs(300),
         }
     }
 }
@@ -46,6 +60,9 @@ impl Config {
             ws_url: std::env::var("ETH_WS_URL").unwrap_or(d.ws_url),
             database_url: std::env::var("DATABASE_URL").unwrap_or(d.database_url),
             stats_interval: parse_env_secs("MEV_STATS_SECS", d.stats_interval)?,
+            validate_every: parse_env_secs("MEV_VALIDATE_EVERY_SECS", d.validate_every)?,
+            validate_min_age: parse_env_secs("MEV_VALIDATE_MIN_AGE_SECS", d.validate_min_age)?,
+            validate_max_age: parse_env_secs("MEV_VALIDATE_MAX_AGE_SECS", d.validate_max_age)?,
         })
     }
 }
@@ -75,5 +92,8 @@ mod tests {
         assert_eq!(d.ws_url, ETH_WS_DEFAULT);
         assert_eq!(d.database_url, DATABASE_URL_DEFAULT);
         assert_eq!(d.stats_interval, Duration::from_secs(5));
+        assert_eq!(d.validate_every, Duration::from_secs(30));
+        assert_eq!(d.validate_min_age, Duration::from_secs(60));
+        assert_eq!(d.validate_max_age, Duration::from_secs(300));
     }
 }
