@@ -5,8 +5,9 @@
 > system with **memory**: every decoded pending swap is stored, so operators can
 > be clustered, their strategies fingerprinted, and their P&L estimated.
 
-> **Status:** P3.1 — live ingestion + persistence. The analysis layers
-> (clustering, classification, P&L, LLM reports) are the next phases.
+> **Status:** P3.1–P3.2 — live ingestion + persistence, enriched with the real
+> on-chain outcome (mined / reverted / dropped) of every captured tx. The
+> entity/classification/P&L/LLM layers are the next phases.
 
 ---
 
@@ -26,7 +27,7 @@ projects:
 - **[`base-arb-scanner`](https://github.com/0xMars42/base-arb-scanner)** —
   cross-DEX arbitrage pricing with on-chain Quoter validation.
 
-## What it does today (P3.1)
+## What it does today (P3.1–P3.2)
 
 ```
 WebSocket pending tx  ─►  router whitelist filter  ─►  decode swap (P2 lib)
@@ -42,6 +43,9 @@ WebSocket pending tx  ─►  router whitelist filter  ─►  decode swap (P2 l
 - Filters to known DEX routers (Uniswap V2/V3, Universal Router, 1inch v6).
 - Decodes the swap and writes a flat `pending_tx` row, **deduplicated on tx hash**.
 - Embedded SQL migrations run at startup (no `sqlx-cli` needed).
+- A periodic **validation pass** reads each tx's receipt once it is old enough
+  and records the real outcome (mined / reverted / dropped) in `tx_outcome`.
+  The swap+outcome dataset is `pending_tx JOIN tx_outcome USING (hash)`.
 
 ## Design choices
 
@@ -85,8 +89,8 @@ SELECT token_out, count(*) AS n FROM pending_tx
 
 | Phase | Status | What |
 |---|---|---|
-| P3.1 | 🔨 | Live ingestion + persistence (`pending_tx`) |
-| P3.2 | 📋 | Backfill receipts + swap/outcome dataset |
+| P3.1 | ✅ | Live ingestion + persistence (`pending_tx`) |
+| P3.2 | ✅ | Receipts → outcome (`tx_outcome`): swap + mined/reverted/dropped dataset |
 | P3.3 | 📋 | Entity layer: address clustering (funding, deployer, timing) |
 | P3.4 | 📋 | Behavioural classification → bot taxonomy |
 | P3.5 | 📋 | P&L estimation + leaderboards |
