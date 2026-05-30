@@ -10,6 +10,9 @@
 > **analytics/leaderboards**, exposed via an **MCP server** (drive it from your
 > own Claude — no API key) and a **web dashboard + JSON API**.
 
+📄 **[Research note — what it finds on the live mempool](WRITEUP.md)** (first
+findings + honest limits).
+
 ---
 
 ## Why this exists
