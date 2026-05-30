@@ -68,10 +68,6 @@ async fn main() -> Result<()> {
         .await?;
     info!("WS Ethereum connecte");
 
-    let sub = provider.subscribe_full_pending_transactions().await?;
-    let mut stream = sub.into_stream();
-    info!("Subscription `newPendingTransactions` (full bodies) active — Ctrl+C pour arreter");
-
     let mut raw: u64 = 0; // tout pending tx recu (avant filtre router)
     let mut total: u64 = 0; // tx ciblant un router whitelist
     let mut inserted: u64 = 0; // nouvelles lignes persistees
@@ -80,121 +76,141 @@ async fn main() -> Result<()> {
     let mut last_log = Instant::now();
     let mut validate_tick = tokio::time::interval(cfg.validate_every);
 
-    loop {
-        tokio::select! {
-            maybe_tx = stream.next() => {
-                let Some(tx) = maybe_tx else { break };
-                raw += 1;
+    // Boucle de reconnexion : si le WS tombe, on re-souscrit au lieu de sortir
+    // (un daemon doit survivre aux coupures). Les compteurs au-dessus persistent.
+    'reconnect: loop {
+        let sub = match provider.subscribe_full_pending_transactions().await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(err = %e, "subscribe KO — nouvelle tentative dans 5s");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue 'reconnect;
+            }
+        };
+        let mut stream = sub.into_stream();
+        info!("Subscription `newPendingTransactions` (full bodies) active — Ctrl+C pour arreter");
 
-                // Filtre : seulement les tx vers un router DEX whitelist.
-                let Some(to) = tx.inner.to() else { continue };
-                let Some(router) = lookup(to) else { continue };
-                total += 1;
+        loop {
+            tokio::select! {
+                    maybe_tx = stream.next() => {
+                        let Some(tx) = maybe_tx else {
+                            warn!("stream pending ferme (WS coupe ?) — reconnexion");
+                            break;
+                        };
+                        raw += 1;
 
-                let input = tx.inner.input();
-                let decoded = decode_swap(router, input);
-                let ctx = TxContext {
-                    hash: *tx.inner.hash(),
-                    from: tx.inner.signer(),
-                    to,
-                    value: tx.inner.value(),
-                    max_fee_per_gas: tx.inner.max_fee_per_gas(),
-                    input: input.to_vec(),
-                };
-                let row = pending_row(router, &decoded, &ctx, now_ms());
+                    // Filtre : seulement les tx vers un router DEX whitelist.
+                    let Some(to) = tx.inner.to() else { continue };
+                    let Some(router) = lookup(to) else { continue };
+                    total += 1;
 
-                match db.insert_pending(&row).await {
-                    Ok(true) => {
-                        inserted += 1;
+                    let input = tx.inner.input();
+                    let decoded = decode_swap(router, input);
+                    let ctx = TxContext {
+                        hash: *tx.inner.hash(),
+                        from: tx.inner.signer(),
+                        to,
+                        value: tx.inner.value(),
+                        max_fee_per_gas: tx.inner.max_fee_per_gas(),
+                        input: input.to_vec(),
+                    };
+                    let row = pending_row(router, &decoded, &ctx, now_ms());
+
+                    match db.insert_pending(&row).await {
+                        Ok(true) => {
+                            inserted += 1;
+                            info!(
+                                router = row.router,
+                                kind = row.kind,
+                                token_out = row.token_out.as_deref().unwrap_or("-"),
+                                from = row.from_addr,
+                                hash = row.hash,
+                                "pending persiste"
+                            );
+                        }
+                        Ok(false) => dup += 1,
+                        Err(e) => warn!(err = %e, hash = row.hash, "insert KO"),
+                    }
+
+                    if last_log.elapsed() >= cfg.stats_interval {
+                        let in_db = db.count_pending().await.unwrap_or(-1);
                         info!(
-                            router = row.router,
-                            kind = row.kind,
-                            token_out = row.token_out.as_deref().unwrap_or("-"),
-                            from = row.from_addr,
-                            hash = row.hash,
-                            "pending persiste"
+                            raw,
+                            total,
+                            inserted,
+                            dup,
+                            rows_in_db = in_db,
+                            "stats ingestion"
+                        );
+                        last_log = Instant::now();
+                    }
+                }
+                _ = validate_tick.tick() => {
+                    // Passe de validation : pour les pending tx assez vieilles et pas
+                    // encore figees, on lit le receipt et on enregistre l'outcome.
+                    let now = now_ms();
+                    let max_seen = now - cfg.validate_min_age.as_millis() as i64;
+                    let candidates = db
+                        .hashes_to_validate(max_seen, VALIDATE_BATCH)
+                        .await
+                        .unwrap_or_default();
+                    let parsed: Vec<(String, i64, B256)> = candidates
+                        .into_iter()
+                        .filter_map(|(h, s)| h.parse::<B256>().ok().map(|b| (h, s, b)))
+                        .collect();
+                    if !parsed.is_empty() {
+                        let hashes: Vec<B256> = parsed.iter().map(|(_, _, b)| *b).collect();
+                        let outcomes = validate_hashes(&provider, &hashes).await;
+                        let drop_before = now - cfg.validate_max_age.as_millis() as i64;
+                        let (mut ms, mut mr, mut nm, mut retry) = (0u32, 0u32, 0u32, 0u32);
+                        for ((hash, seen_at, _), (_, outcome)) in parsed.iter().zip(&outcomes) {
+                            let (label, block) = match outcome {
+                                ValidationOutcome::MinedSuccess { block_number } => {
+                                    ms += 1;
+                                    ("MinedSuccess", Some(*block_number as i64))
+                                }
+                                ValidationOutcome::MinedReverted { block_number } => {
+                                    mr += 1;
+                                    ("MinedReverted", Some(*block_number as i64))
+                                }
+                                ValidationOutcome::NotMined => {
+                                    // Pas de receipt : on ne fige NotMined que si la tx est
+                                    // vraiment vieille ; sinon elle peut encore etre minee,
+                                    // on la re-testera au prochain tick.
+                                    if *seen_at > drop_before {
+                                        retry += 1;
+                                        continue;
+                                    }
+                                    nm += 1;
+                                    ("NotMined", None)
+                                }
+                            };
+                            if let Err(e) = db.record_outcome(hash, label, block, now).await {
+                                warn!(err = %e, hash = %hash, "record_outcome KO");
+                            } else {
+                                outcomes_recorded += 1;
+                            }
+                        }
+                        let in_db = db.count_outcomes().await.unwrap_or(-1);
+                        info!(
+                            checked = parsed.len(),
+                            mined_success = ms,
+                            mined_reverted = mr,
+                            not_mined = nm,
+                            retry_later = retry,
+                            outcomes_in_db = in_db,
+                            "validation"
                         );
                     }
-                    Ok(false) => dup += 1,
-                    Err(e) => warn!(err = %e, hash = row.hash, "insert KO"),
                 }
-
-                if last_log.elapsed() >= cfg.stats_interval {
-                    let in_db = db.count_pending().await.unwrap_or(-1);
-                    info!(
-                        raw,
-                        total,
-                        inserted,
-                        dup,
-                        rows_in_db = in_db,
-                        "stats ingestion"
-                    );
-                    last_log = Instant::now();
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Ctrl+C recu — arret propre");
+                    break 'reconnect;
                 }
-            }
-            _ = validate_tick.tick() => {
-                // Passe de validation : pour les pending tx assez vieilles et pas
-                // encore figees, on lit le receipt et on enregistre l'outcome.
-                let now = now_ms();
-                let max_seen = now - cfg.validate_min_age.as_millis() as i64;
-                let candidates = db
-                    .hashes_to_validate(max_seen, VALIDATE_BATCH)
-                    .await
-                    .unwrap_or_default();
-                let parsed: Vec<(String, i64, B256)> = candidates
-                    .into_iter()
-                    .filter_map(|(h, s)| h.parse::<B256>().ok().map(|b| (h, s, b)))
-                    .collect();
-                if !parsed.is_empty() {
-                    let hashes: Vec<B256> = parsed.iter().map(|(_, _, b)| *b).collect();
-                    let outcomes = validate_hashes(&provider, &hashes).await;
-                    let drop_before = now - cfg.validate_max_age.as_millis() as i64;
-                    let (mut ms, mut mr, mut nm, mut retry) = (0u32, 0u32, 0u32, 0u32);
-                    for ((hash, seen_at, _), (_, outcome)) in parsed.iter().zip(&outcomes) {
-                        let (label, block) = match outcome {
-                            ValidationOutcome::MinedSuccess { block_number } => {
-                                ms += 1;
-                                ("MinedSuccess", Some(*block_number as i64))
-                            }
-                            ValidationOutcome::MinedReverted { block_number } => {
-                                mr += 1;
-                                ("MinedReverted", Some(*block_number as i64))
-                            }
-                            ValidationOutcome::NotMined => {
-                                // Pas de receipt : on ne fige NotMined que si la tx est
-                                // vraiment vieille ; sinon elle peut encore etre minee,
-                                // on la re-testera au prochain tick.
-                                if *seen_at > drop_before {
-                                    retry += 1;
-                                    continue;
-                                }
-                                nm += 1;
-                                ("NotMined", None)
-                            }
-                        };
-                        if let Err(e) = db.record_outcome(hash, label, block, now).await {
-                            warn!(err = %e, hash = %hash, "record_outcome KO");
-                        } else {
-                            outcomes_recorded += 1;
-                        }
-                    }
-                    let in_db = db.count_outcomes().await.unwrap_or(-1);
-                    info!(
-                        checked = parsed.len(),
-                        mined_success = ms,
-                        mined_reverted = mr,
-                        not_mined = nm,
-                        retry_later = retry,
-                        outcomes_in_db = in_db,
-                        "validation"
-                    );
-                }
-            }
-            _ = tokio::signal::ctrl_c() => {
-                info!("Ctrl+C recu — arret propre");
-                break;
             }
         }
+        // Stream interne tombe (WS coupe) : petit backoff avant de re-souscrire.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 
     let in_db = db.count_pending().await.unwrap_or(-1);

@@ -15,6 +15,17 @@ use eyre::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use std::collections::HashMap;
 
+/// Tokens "quote" (cotation) Ethereum L1 — WETH/USDC/USDT/DAI. Touchés par
+/// presque tout le monde, donc exclus du "token sujet" d'un swap : sinon on
+/// clusteriserait / profilerait les bots sur ces tokens communs. Le token sujet
+/// = le côté NON-quote (token_out pour un achat, token_in pour une vente) ;
+/// NULL si les deux côtés sont des quotes. Corrige le biais où une VENTE a
+/// `token_out = WETH` (le même piège que `QUOTE_TOKENS` dans eth-mempool-watcher).
+const SUBJECT_TOKEN_SQL: &str = "CASE \
+    WHEN token_out IS NOT NULL AND token_out NOT IN ('0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2','0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48','0xdac17f958d2ee523a2206206994597c13d831ec7','0x6b175474e89094c44da98b954eedeac495271d0f') THEN token_out \
+    WHEN token_in IS NOT NULL AND token_in NOT IN ('0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2','0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48','0xdac17f958d2ee523a2206206994597c13d831ec7','0x6b175474e89094c44da98b954eedeac495271d0f') THEN token_in \
+    ELSE NULL END";
+
 /// Handle de base de données (le `SqlitePool` est `Clone`, partage interne Arc).
 #[derive(Clone, Debug)]
 pub struct Db {
@@ -161,15 +172,19 @@ impl Db {
         Ok(n)
     }
 
-    /// Observations de swap pour le clustering : `(from, token_out, seen_at_ms)`
-    /// de chaque pending tx ayant un `token_out` décodé, triées par temps.
+    /// Observations de swap pour le clustering : `(from, subject_token, seen_at_ms)`,
+    /// où `subject_token` est le côté NON-quote du swap (cf. `SUBJECT_TOKEN_SQL`).
+    /// On exclut les swaps dont les deux côtés sont des quote tokens (WETH/stables) :
+    /// clusteriser sur ces tokens communs créerait de faux liens d'opérateur.
     pub async fn swap_observations(&self) -> Result<Vec<(String, String, i64)>> {
-        let rows = sqlx::query_as::<_, (String, String, i64)>(
-            "SELECT from_addr, token_out, seen_at_ms FROM pending_tx \
-             WHERE token_out IS NOT NULL ORDER BY seen_at_ms ASC",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let sql = format!(
+            "SELECT from_addr, subject, seen_at_ms FROM ( \
+               SELECT from_addr, seen_at_ms, {SUBJECT_TOKEN_SQL} AS subject FROM pending_tx \
+             ) WHERE subject IS NOT NULL ORDER BY seen_at_ms ASC"
+        );
+        let rows = sqlx::query_as::<_, (String, String, i64)>(&sql)
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows)
     }
 
@@ -231,18 +246,21 @@ impl Db {
         // Deux placeholders WETH positionnels (count + volume) -> on bind 2 fois.
         // Le volume est sommé en REAL (proxy ETH-scale ; la perte sub-wei n'a
         // pas d'impact sur un classement), pas en U256 exact.
-        let base = sqlx::query_as::<_, (String, i64, i64, i64, i64, f64, f64, i64, i64)>(
-            "SELECT from_addr, COUNT(*), COUNT(DISTINCT token_out), \
+        // `distinct` compte les tokens SUJETS distincts (côté non-quote), pas les
+        // `token_out` bruts : un vendeur multi-tokens n'apparaît plus comme mono-token.
+        let sql = format!(
+            "SELECT from_addr, COUNT(*), COUNT(DISTINCT {SUBJECT_TOKEN_SQL}), \
                     SUM(CASE WHEN token_in = ? THEN 1 ELSE 0 END), \
                     COUNT(token_in), AVG(max_fee_gwei), \
                     SUM(CASE WHEN token_in = ? THEN CAST(amount_in_wei AS REAL) ELSE 0 END) / 1e18, \
                     MIN(seen_at_ms), MAX(seen_at_ms) \
-             FROM pending_tx GROUP BY from_addr",
-        )
-        .bind(WETH)
-        .bind(WETH)
-        .fetch_all(&self.pool)
-        .await?;
+             FROM pending_tx GROUP BY from_addr"
+        );
+        let base = sqlx::query_as::<_, (String, i64, i64, i64, i64, f64, f64, i64, i64)>(&sql)
+            .bind(WETH)
+            .bind(WETH)
+            .fetch_all(&self.pool)
+            .await?;
 
         let mut map: HashMap<String, AddressFeatures> = base
             .into_iter()

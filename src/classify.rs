@@ -15,7 +15,9 @@ pub struct AddressFeatures {
     pub address: String,
     /// Nombre total de swaps observés (router-hits).
     pub tx_count: u64,
-    /// Tokens `token_out` distincts visés (décodés ; 0 si que de l'opaque UR).
+    /// Tokens *sujets* distincts (côté non-quote : `token_out` pour un achat,
+    /// `token_in` pour une vente ; WETH/USDC/USDT/DAI exclus). 0 si que de
+    /// l'opaque (Universal Router / 1inch) ou que des quote tokens.
     pub distinct_tokens_out: u64,
     /// Swaps dont `token_in` == WETH (= achat de token avec de l'ETH).
     pub weth_in_count: u64,
