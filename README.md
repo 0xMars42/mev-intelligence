@@ -5,10 +5,10 @@
 > system with **memory**: every decoded pending swap is stored, so operators can
 > be clustered, their strategies fingerprinted, and their P&L estimated.
 
-> **Status:** P3.1–P3.4 — live ingestion + persistence, enriched with each tx's
-> real on-chain outcome, an entity layer that clusters wallets into **operators**,
-> and a behavioural **classification** that assigns each address a bot type. P&L
-> estimation and LLM reports are the next phases.
+> **Status:** P3.1–P3.5 — live ingestion + persistence, each tx's real on-chain
+> outcome, an entity layer (wallet → **operator** clusters), behavioural
+> **classification** (bot types), and per-bot **analytics & leaderboards**
+> (volume, activity, success/revert rates). LLM-generated reports are next.
 
 ---
 
@@ -70,6 +70,7 @@ cd mev-intelligence
 cargo run --release            # daemon: ingests + validates into ./mev_intel.db
 cargo run --bin cluster        # on-demand: cluster wallets into operators
 cargo run --bin classify       # on-demand: assign each address a bot type
+cargo run --bin leaderboard    # on-demand: per-bot stats + top-10 leaderboards
 ```
 
 Inspect what's been captured (any SQLite client):
@@ -96,7 +97,7 @@ SELECT token_out, count(*) AS n FROM pending_tx
 | P3.2 | ✅ | Receipts → outcome (`tx_outcome`): swap + mined/reverted/dropped dataset |
 | P3.3 | ✅ | Entity layer: cluster wallets into operators by co-occurrence (`operator`) |
 | P3.4 | ✅ | Behavioural classification → bot taxonomy (`bot_class`) |
-| P3.5 | 📋 | P&L estimation + leaderboards |
+| P3.5 | ✅ | Per-bot analytics + leaderboards (`bot_stats`): volume / activity / rates |
 | P3.6 | 📋 | LLM agents: natural-language bot profiles (Claude API) |
 | P3.7 | 📋 | Dashboard / query API |
 
