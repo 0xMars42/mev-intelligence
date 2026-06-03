@@ -10,6 +10,7 @@
 //! | `MEV_VALIDATE_EVERY_SECS`| `30`                                | Période de la passe de validation   |
 //! | `MEV_VALIDATE_MIN_AGE_SECS`| `60`                              | Âge mini avant de valider une tx    |
 //! | `MEV_VALIDATE_MAX_AGE_SECS`| `300`                             | Âge au-delà duquel NotMined = droppée |
+//! | `MEV_ANALYZE_EVERY_SECS`  | `3600`                            | Période du clustering/classification auto |
 
 use eyre::{Context, Result};
 use std::time::Duration;
@@ -37,6 +38,9 @@ pub struct Config {
     /// Âge au-delà duquel une tx toujours sans receipt est figée `NotMined`
     /// (droppée/remplacée). En-dessous, on la re-testera au prochain tick.
     pub validate_max_age: Duration,
+    /// Période du re-clustering + classification automatique en arrière-plan.
+    /// 0 désactive l'analyse auto (utiliser `./mev.sh analyze` manuellement).
+    pub analyze_every: Duration,
 }
 
 impl Default for Config {
@@ -48,6 +52,7 @@ impl Default for Config {
             validate_every: Duration::from_secs(30),
             validate_min_age: Duration::from_secs(60),
             validate_max_age: Duration::from_secs(300),
+            analyze_every: Duration::from_secs(3600),
         }
     }
 }
@@ -63,6 +68,7 @@ impl Config {
             validate_every: parse_env_secs("MEV_VALIDATE_EVERY_SECS", d.validate_every)?,
             validate_min_age: parse_env_secs("MEV_VALIDATE_MIN_AGE_SECS", d.validate_min_age)?,
             validate_max_age: parse_env_secs("MEV_VALIDATE_MAX_AGE_SECS", d.validate_max_age)?,
+            analyze_every: parse_env_secs("MEV_ANALYZE_EVERY_SECS", d.analyze_every)?,
         })
     }
 }

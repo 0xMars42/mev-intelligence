@@ -39,3 +39,13 @@ pub mod cluster;
 pub mod config;
 pub mod db;
 pub mod ingest;
+pub mod scan;
+pub mod tokenflow;
+
+/// Epoch millis courant (timestamp universel, même sémantique partout).
+pub fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}

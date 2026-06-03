@@ -41,7 +41,10 @@ only the public mempool is observed (private orderflow is invisible).";
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let _ = dotenvy::dotenv();
+    if let Err(e) = dotenvy::dotenv()
+        && !e.not_found() {
+            eprintln!("[warn] .env : {e}");
+        }
     // IMPORTANT : logs sur STDERR — STDOUT est reserve au JSON-RPC.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)

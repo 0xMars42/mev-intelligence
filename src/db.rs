@@ -15,16 +15,43 @@ use eyre::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use std::collections::HashMap;
 
-/// Tokens "quote" (cotation) Ethereum L1 — WETH/USDC/USDT/DAI. Touchés par
-/// presque tout le monde, donc exclus du "token sujet" d'un swap : sinon on
-/// clusteriserait / profilerait les bots sur ces tokens communs. Le token sujet
-/// = le côté NON-quote (token_out pour un achat, token_in pour une vente) ;
-/// NULL si les deux côtés sont des quotes. Corrige le biais où une VENTE a
-/// `token_out = WETH` (le même piège que `QUOTE_TOKENS` dans eth-mempool-watcher).
+// Tokens "quote" Ethereum L1 (WETH/USDC/USDT/DAI) — exclus du token sujet d'un
+// swap pour éviter de clusteriser / classifier sur des tokens universels.
+// Si tu changes une adresse ici, mets aussi à jour SUBJECT_TOKEN_SQL ci-dessous.
+pub const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
+#[allow(dead_code)] // présent pour documenter SUBJECT_TOKEN_SQL — concat!() n'accepte pas les consts
+const USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+#[allow(dead_code)]
+const USDT: &str = "0xdac17f958d2ee523a2206206994597c13d831ec7";
+#[allow(dead_code)]
+const DAI: &str = "0x6b175474e89094c44da98b954eedeac495271d0f";
+
+/// Expression SQL qui calcule le "token sujet" d'un swap : le côté NON-quote.
+/// Addresses = WETH/USDC/USDT/DAI (voir constantes ci-dessus).
+/// Note : concat!() n'accepte pas de consts — les adresses sont dupliquées ici
+/// volontairement ; les deux sources de vérité sont dans ce fichier, côte à côte.
 const SUBJECT_TOKEN_SQL: &str = "CASE \
     WHEN token_out IS NOT NULL AND token_out NOT IN ('0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2','0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48','0xdac17f958d2ee523a2206206994597c13d831ec7','0x6b175474e89094c44da98b954eedeac495271d0f') THEN token_out \
-    WHEN token_in IS NOT NULL AND token_in NOT IN ('0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2','0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48','0xdac17f958d2ee523a2206206994597c13d831ec7','0x6b175474e89094c44da98b954eedeac495271d0f') THEN token_in \
+    WHEN token_in  IS NOT NULL AND token_in  NOT IN ('0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2','0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48','0xdac17f958d2ee523a2206206994597c13d831ec7','0x6b175474e89094c44da98b954eedeac495271d0f') THEN token_in \
     ELSE NULL END";
+
+/// Candidat sandwich détecté dans un bloc (via flux de tokens).
+#[derive(Clone, Debug)]
+pub struct SandwichCandidate {
+    pub block_number: i64,
+    pub frontrun_hash: String,
+    pub victim_hash: String,
+    pub backrun_hash: String,
+    pub attacker_addr: String,
+    pub target_token: Option<String>,
+    pub pool: Option<String>,
+    pub front_amount: Option<String>,
+    pub back_amount: Option<String>,
+    pub frontrun_idx: i64,
+    pub victim_idx: i64,
+    pub backrun_idx: i64,
+    pub detected_at_ms: i64,
+}
 
 /// Handle de base de données (le `SqlitePool` est `Clone`, partage interne Arc).
 #[derive(Clone, Debug)]
@@ -144,24 +171,83 @@ impl Db {
     }
 
     /// Fige l'outcome d'une tx (idempotent sur `hash`).
+    /// `tx_index` = position dans le bloc (None pour NotMined).
     pub async fn record_outcome(
         &self,
         hash: &str,
         outcome: &str,
         block_number: Option<i64>,
+        tx_index: Option<i64>,
         checked_at_ms: i64,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT OR IGNORE INTO tx_outcome (hash, outcome, block_number, checked_at_ms) \
-             VALUES (?,?,?,?)",
+            "INSERT OR IGNORE INTO tx_outcome \
+             (hash, outcome, block_number, tx_index, checked_at_ms) \
+             VALUES (?,?,?,?,?)",
         )
         .bind(hash)
         .bind(outcome)
         .bind(block_number)
+        .bind(tx_index)
         .bind(checked_at_ms)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Insère des candidats sandwich détectés (idempotent sur frontrun+victim+backrun).
+    pub async fn insert_sandwich_candidates(&self, candidates: &[SandwichCandidate]) -> Result<()> {
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        for c in candidates {
+            sqlx::query(
+                "INSERT OR IGNORE INTO sandwich_candidate \
+                 (block_number, frontrun_hash, victim_hash, backrun_hash, attacker_addr, \
+                  target_token, pool, front_amount, back_amount, \
+                  frontrun_idx, victim_idx, backrun_idx, detected_at_ms) \
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            )
+            .bind(c.block_number)
+            .bind(&c.frontrun_hash)
+            .bind(&c.victim_hash)
+            .bind(&c.backrun_hash)
+            .bind(&c.attacker_addr)
+            .bind(c.target_token.as_deref())
+            .bind(c.pool.as_deref())
+            .bind(c.front_amount.as_deref())
+            .bind(c.back_amount.as_deref())
+            .bind(c.frontrun_idx)
+            .bind(c.victim_idx)
+            .bind(c.backrun_idx)
+            .bind(c.detected_at_ms)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Résumé des sandwiches détectés.
+    /// Renvoie `(attacker_addr, nb_sandwiches, blocks_distincts, cible_la_plus_freq)`.
+    pub async fn sandwich_summary(&self) -> Result<Vec<(String, i64, i64, Option<String>)>> {
+        let rows = sqlx::query_as::<_, (String, i64, i64, Option<String>)>(
+            "SELECT attacker_addr, \
+                    COUNT(*) AS nb, \
+                    COUNT(DISTINCT block_number) AS blocks, \
+                    (SELECT target_token FROM sandwich_candidate s2 \
+                     WHERE s2.attacker_addr = s.attacker_addr \
+                       AND s2.target_token IS NOT NULL \
+                     GROUP BY target_token ORDER BY COUNT(*) DESC LIMIT 1) AS top_token \
+             FROM sandwich_candidate s \
+             GROUP BY attacker_addr \
+             ORDER BY nb DESC \
+             LIMIT 20",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     /// Nombre total d'outcomes figés (pour les stats).
@@ -240,9 +326,6 @@ impl Db {
     /// Features par address pour la classification (P3.4) : deux agrégats SQL
     /// (`pending_tx` puis jointure `tx_outcome`) recombinés en mémoire.
     pub async fn address_features(&self) -> Result<Vec<AddressFeatures>> {
-        // WETH L1 (lowercase, comme on stocke les adresses décodées).
-        const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
-
         // Deux placeholders WETH positionnels (count + volume) -> on bind 2 fois.
         // Le volume est sommé en REAL (proxy ETH-scale ; la perte sub-wei n'a
         // pas d'impact sur un classement), pas en U256 exact.
@@ -499,32 +582,117 @@ impl Db {
         }))
     }
 
-    /// Liste des opérateurs (clusters multi-address) avec leurs addresses.
-    /// `(id, size, shared_tokens, first_seen_ms, last_seen_ms, addresses)`.
-    pub async fn list_operators(&self) -> Result<Vec<(i64, i64, i64, i64, i64, Vec<String>)>> {
-        let ops = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
-            "SELECT id, size, shared_token_count, first_seen_ms, last_seen_ms \
-             FROM operator ORDER BY size DESC, shared_token_count DESC",
+    /// Candidats copy-trader : paires (leader, follower) où `follower` envoie
+    /// systématiquement un swap sur le même token que `leader` dans `window_ms`,
+    /// et les deux adresses appartiennent à des opérateurs *différents* (sinon
+    /// c'est juste la rotation de wallets d'un même opérateur).
+    /// Renvoie `(leader, follower, tokens_copies, nb_copies, avg_delay_ms)`.
+    pub async fn copy_trader_candidates(
+        &self,
+        window_ms: i64,
+        min_copies: i64,
+    ) -> Result<Vec<(String, String, i64, i64, i64)>> {
+        let sql = format!(
+            "WITH obs AS ( \
+               SELECT from_addr, seen_at_ms, {SUBJECT_TOKEN_SQL} AS subject FROM pending_tx \
+             ), decoded AS (SELECT * FROM obs WHERE subject IS NOT NULL) \
+             SELECT a.from_addr, b.from_addr, \
+                    COUNT(DISTINCT a.subject) AS tokens_copies, \
+                    COUNT(*) AS nb_copies, \
+                    CAST(AVG(b.seen_at_ms - a.seen_at_ms) AS INTEGER) AS avg_delay_ms \
+             FROM decoded a \
+             JOIN decoded b ON ( \
+                 a.subject = b.subject \
+                 AND b.from_addr <> a.from_addr \
+                 AND b.seen_at_ms > a.seen_at_ms \
+                 AND b.seen_at_ms - a.seen_at_ms <= ? \
+             ) \
+             WHERE NOT EXISTS ( \
+                 SELECT 1 FROM operator_address oa1 \
+                 JOIN operator_address oa2 ON oa1.operator_id = oa2.operator_id \
+                 WHERE oa1.address = a.from_addr AND oa2.address = b.from_addr \
+             ) \
+             GROUP BY a.from_addr, b.from_addr \
+             HAVING COUNT(*) >= ? \
+             ORDER BY nb_copies DESC, tokens_copies DESC \
+             LIMIT 50"
+        );
+        let rows = sqlx::query_as::<_, (String, String, i64, i64, i64)>(&sql)
+            .bind(window_ms)
+            .bind(min_copies)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows)
+    }
+
+    /// Top adresses par gas bid max — révèle les snipers et bots ultra-agressifs.
+    /// Renvoie `(address, max_fee_gwei, nb_tx_high_gas, class)`.
+    pub async fn top_gas_bidders(
+        &self,
+        min_gwei: f64,
+        limit: i64,
+    ) -> Result<Vec<(String, f64, i64, Option<String>)>> {
+        let rows = sqlx::query_as::<_, (String, f64, i64, Option<String>)>(
+            "SELECT p.from_addr, MAX(p.max_fee_gwei) AS peak_gwei, \
+                    COUNT(*) AS nb_tx_over_threshold, c.class \
+             FROM pending_tx p \
+             LEFT JOIN bot_class c ON c.address = p.from_addr \
+             WHERE p.max_fee_gwei >= ? \
+             GROUP BY p.from_addr \
+             ORDER BY peak_gwei DESC \
+             LIMIT ?",
+        )
+        .bind(min_gwei)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Distribution de gas (`max_fee_gwei`) par classe de bot.
+    /// Renvoie `(class, tx_count, avg_gwei, min_gwei, max_gwei, addr_count)`.
+    pub async fn gas_stats_by_class(&self) -> Result<Vec<(String, i64, f64, f64, f64, i64)>> {
+        let rows = sqlx::query_as::<_, (String, i64, f64, f64, f64, i64)>(
+            "SELECT COALESCE(c.class, 'Unclassified') AS class, \
+                    COUNT(*) AS tx_count, \
+                    ROUND(AVG(p.max_fee_gwei), 3) AS avg_gwei, \
+                    ROUND(MIN(p.max_fee_gwei), 3) AS min_gwei, \
+                    ROUND(MAX(p.max_fee_gwei), 3) AS max_gwei, \
+                    COUNT(DISTINCT p.from_addr) AS addr_count \
+             FROM pending_tx p \
+             LEFT JOIN bot_class c ON c.address = p.from_addr \
+             WHERE p.max_fee_gwei > 0 \
+             GROUP BY class \
+             ORDER BY avg_gwei DESC",
         )
         .fetch_all(&self.pool)
         .await?;
-        let mut out = Vec::with_capacity(ops.len());
-        for (id, size, shared, first, last) in ops {
-            let addrs = sqlx::query_as::<_, (String,)>(
-                "SELECT address FROM operator_address WHERE operator_id = ? ORDER BY address",
-            )
-            .bind(id)
-            .fetch_all(&self.pool)
-            .await?;
-            out.push((
-                id,
-                size,
-                shared,
-                first,
-                last,
-                addrs.into_iter().map(|(a,)| a).collect(),
-            ));
-        }
-        Ok(out)
+        Ok(rows)
+    }
+
+    /// Liste des opérateurs (clusters multi-address) avec leurs addresses.
+    /// `(id, size, shared_tokens, first_seen_ms, last_seen_ms, addresses)`.
+    /// Utilise GROUP_CONCAT pour éviter N+1 requêtes (1 seule JOIN au lieu d'1 par opérateur).
+    pub async fn list_operators(&self) -> Result<Vec<(i64, i64, i64, i64, i64, Vec<String>)>> {
+        let rows = sqlx::query_as::<_, (i64, i64, i64, i64, i64, Option<String>)>(
+            "SELECT o.id, o.size, o.shared_token_count, o.first_seen_ms, o.last_seen_ms, \
+             GROUP_CONCAT(oa.address, ',') \
+             FROM operator o \
+             LEFT JOIN operator_address oa ON oa.operator_id = o.id \
+             GROUP BY o.id \
+             ORDER BY o.size DESC, o.shared_token_count DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(id, size, shared, first, last, addrs_csv)| {
+                let addrs = addrs_csv
+                    .map(|s| s.split(',').map(str::to_owned).collect())
+                    .unwrap_or_default();
+                (id, size, shared, first, last, addrs)
+            })
+            .collect())
     }
 }

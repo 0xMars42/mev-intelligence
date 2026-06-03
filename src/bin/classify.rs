@@ -22,13 +22,17 @@ use eyre::Result;
 use mev_intelligence::classify::{AddressFeatures, BotClass, classify};
 use mev_intelligence::config::Config;
 use mev_intelligence::db::Db;
+use mev_intelligence::now_ms;
 use std::collections::BTreeMap;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let _ = dotenvy::dotenv();
+    if let Err(e) = dotenvy::dotenv()
+        && !e.not_found() {
+            eprintln!("[warn] .env : {e}");
+        }
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
@@ -72,11 +76,4 @@ async fn main() -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as i64)
 }
