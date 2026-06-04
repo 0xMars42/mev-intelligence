@@ -39,6 +39,7 @@ pub mod cluster;
 pub mod config;
 pub mod db;
 pub mod ingest;
+pub mod profit;
 pub mod scan;
 pub mod tokenflow;
 

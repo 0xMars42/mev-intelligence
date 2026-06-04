@@ -47,6 +47,8 @@ pub struct SandwichCandidate {
     pub pool: Option<String>,
     pub front_amount: Option<String>,
     pub back_amount: Option<String>,
+    pub gross_profit: Option<String>,
+    pub profit_token: Option<String>,
     pub frontrun_idx: i64,
     pub victim_idx: i64,
     pub backrun_idx: i64,
@@ -205,9 +207,9 @@ impl Db {
             sqlx::query(
                 "INSERT OR IGNORE INTO sandwich_candidate \
                  (block_number, frontrun_hash, victim_hash, backrun_hash, attacker_addr, \
-                  target_token, pool, front_amount, back_amount, \
+                  target_token, pool, front_amount, back_amount, gross_profit, profit_token, \
                   frontrun_idx, victim_idx, backrun_idx, detected_at_ms) \
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             )
             .bind(c.block_number)
             .bind(&c.frontrun_hash)
@@ -218,6 +220,8 @@ impl Db {
             .bind(c.pool.as_deref())
             .bind(c.front_amount.as_deref())
             .bind(c.back_amount.as_deref())
+            .bind(c.gross_profit.as_deref())
+            .bind(c.profit_token.as_deref())
             .bind(c.frontrun_idx)
             .bind(c.victim_idx)
             .bind(c.backrun_idx)

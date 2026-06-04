@@ -52,9 +52,10 @@ const MAX_BLOCKS_PER_SCAN: u64 = 30;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     if let Err(e) = dotenvy::dotenv()
-        && !e.not_found() {
-            eprintln!("[warn] .env : {e}");
-        }
+        && !e.not_found()
+    {
+        eprintln!("[warn] .env : {e}");
+    }
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
@@ -355,6 +356,7 @@ async fn analyze_block_for_sandwiches<P: Provider>(
         attacker = %sandwiches[0].attacker,
         token = %sandwiches[0].token,
         pool = %sandwiches[0].pool,
+        profit = %scan::fmt_profit(sandwiches[0].gross_profit, sandwiches[0].profit_token.as_deref()),
         "SANDWICH detecte (flux de tokens)"
     );
     db.insert_sandwich_candidates(&candidates).await?;

@@ -11,6 +11,7 @@ use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::Log;
 use eyre::Result;
+use std::collections::HashMap;
 
 /// Topic0 de l'event ERC-20 `Transfer(address,address,uint256)`.
 pub const TRANSFER_TOPIC: &str =
@@ -52,6 +53,10 @@ pub async fn sandwiches_in_block<P: Provider>(
     };
 
     let mut all_swaps = Vec::new();
+    // Transfers et signer (tx.from) de chaque tx du bloc — nécessaires au calcul
+    // de profit robuste (identification des contrats de l'attaquant vs pools).
+    let mut tx_transfers: HashMap<i64, Vec<Transfer>> = HashMap::new();
+    let mut tx_signer: HashMap<i64, String> = HashMap::new();
     for r in &receipts {
         let tx_hash = format!("{:#x}", r.transaction_hash);
         let tx_from = format!("{:#x}", r.from);
@@ -65,10 +70,44 @@ pub async fn sandwiches_in_block<P: Provider>(
         all_swaps.extend(tokenflow::extract_swaps(
             tx_index, &tx_hash, &tx_from, &tx_to, &transfers,
         ));
+        tx_signer.insert(tx_index, tx_from);
+        tx_transfers.insert(tx_index, transfers);
     }
 
     let n_swaps = all_swaps.len();
-    Ok((n_swaps, tokenflow::detect_sandwiches(&all_swaps)))
+    let mut sandwiches = tokenflow::detect_sandwiches(&all_swaps);
+
+    // Profit net robuste : périmètre = EOA attaquant + ses contrats (adresses
+    // mono-signer), flux quote sur front+back. Gère les flash loans (cf. profit.rs).
+    for s in &mut sandwiches {
+        let (profit, token) = crate::profit::estimate_sandwich_profit(
+            &tx_transfers,
+            &tx_signer,
+            &s.attacker,
+            s.frontrun_idx,
+            s.backrun_idx,
+        );
+        s.gross_profit = profit;
+        s.profit_token = token;
+    }
+
+    Ok((n_swaps, sandwiches))
+}
+
+/// Formate un profit brut (en unités du quote token) de façon lisible, en
+/// appliquant les décimales du quote : `"0.1234 WETH"`, `"250.50 USDC"`…
+pub fn fmt_profit(gross: i128, profit_token: Option<&str>) -> String {
+    let Some(t) = profit_token else {
+        return "n/a (quotes différents)".to_string();
+    };
+    let (sym, dec) = match t {
+        "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2" => ("WETH", 1e18),
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" => ("USDC", 1e6),
+        "0xdac17f958d2ee523a2206206994597c13d831ec7" => ("USDT", 1e6),
+        "0x6b175474e89094c44da98b954eedeac495271d0f" => ("DAI", 1e18),
+        _ => ("?", 1e18),
+    };
+    format!("{:.4} {sym}", gross as f64 / dec)
 }
 
 /// Convertit un [`Sandwich`] (tokenflow) en ligne persistable.
@@ -77,6 +116,12 @@ pub fn to_candidate(
     block_number: i64,
     detected_at_ms: i64,
 ) -> crate::db::SandwichCandidate {
+    // Le profit n'a de sens que si les deux pattes partagent le même quote token.
+    let (gross_profit, profit_token) = if s.profit_token.is_some() {
+        (Some(s.gross_profit.to_string()), s.profit_token.clone())
+    } else {
+        (None, None)
+    };
     crate::db::SandwichCandidate {
         block_number,
         frontrun_hash: s.frontrun_hash.clone(),
@@ -87,6 +132,8 @@ pub fn to_candidate(
         pool: Some(s.pool.clone()),
         front_amount: Some(s.front_amount.to_string()),
         back_amount: Some(s.back_amount.to_string()),
+        gross_profit,
+        profit_token,
         frontrun_idx: s.frontrun_idx,
         victim_idx: s.victim_idx,
         backrun_idx: s.backrun_idx,

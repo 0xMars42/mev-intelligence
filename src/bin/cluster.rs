@@ -37,9 +37,10 @@ const MIN_SHARED_TOKENS: usize = 2;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     if let Err(e) = dotenvy::dotenv()
-        && !e.not_found() {
-            eprintln!("[warn] .env : {e}");
-        }
+        && !e.not_found()
+    {
+        eprintln!("[warn] .env : {e}");
+    }
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();

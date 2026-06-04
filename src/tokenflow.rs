@@ -51,7 +51,7 @@ pub struct SwapAction {
     pub pool: String,
     pub token: String,
     pub is_buy: bool,
-    pub amount: u128, // quantité du token sujet qui transite (pour profit estimé)
+    pub amount: u128, // quantité du token sujet qui transite
 }
 
 /// Un sandwich détecté : attaquant `attacker` encadre `victim` sur `(pool, token)`.
@@ -66,9 +66,14 @@ pub struct Sandwich {
     pub frontrun_idx: i64,
     pub victim_idx: i64,
     pub backrun_idx: i64,
-    /// Tokens achetés au frontrun puis revendus au backrun (pour estimer le profit).
+    /// Tokens achetés au frontrun puis revendus au backrun.
     pub front_amount: u128,
     pub back_amount: u128,
+    /// Profit BRUT estimé en quote (bilan net WETH/stable de l'attaquant sur
+    /// front+back, hors gas). Rempli par [`crate::scan`] via [`estimate_profit`] ;
+    /// `detect_sandwiches` le laisse à `(0, None)` (il n'a pas les transfers).
+    pub gross_profit: i128,
+    pub profit_token: Option<String>,
 }
 
 /// Reconstruit les swaps d'UNE tx depuis ses Transfer logs.
@@ -147,17 +152,18 @@ pub fn extract_swaps(
                 });
             }
         } else if f.sent > f.recv
-            && let Some(pool) = f.pool_sell {
-                out.push(SwapAction {
-                    tx_index,
-                    tx_hash: tx_hash.to_string(),
-                    trader: tx_from.to_string(),
-                    pool,
-                    token: token.to_string(),
-                    is_buy: false,
-                    amount: f.sent - f.recv,
-                });
-            }
+            && let Some(pool) = f.pool_sell
+        {
+            out.push(SwapAction {
+                tx_index,
+                tx_hash: tx_hash.to_string(),
+                trader: tx_from.to_string(),
+                pool,
+                token: token.to_string(),
+                is_buy: false,
+                amount: f.sent - f.recv,
+            });
+        }
     }
     out
 }
@@ -220,6 +226,9 @@ pub fn detect_sandwiches(swaps: &[SwapAction]) -> Vec<Sandwich> {
                     backrun_idx: back.tx_index,
                     front_amount: front.amount,
                     back_amount: back.amount,
+                    // Profit rempli ensuite par scan::sandwiches_in_block (besoin des transfers).
+                    gross_profit: 0,
+                    profit_token: None,
                 });
                 break; // un sandwich par (front, attaquant) suffit
             }
@@ -274,6 +283,9 @@ mod tests {
         assert!(!swaps[0].is_buy);
         assert_eq!(swaps[0].trader, ATK_EOA);
     }
+
+    // Le profit est désormais calculé par `crate::profit` (reconstruction du
+    // périmètre de l'attaquant) — testé dans ce module-là.
 
     /// Helpers : un swap achat/vente via (eoa, bot) contre un pool.
     fn buy(idx: i64, hash: &str, eoa: &str, bot: &str, pool: &str, amt: u128) -> Vec<SwapAction> {
